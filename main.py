@@ -6,8 +6,6 @@ import os
 from dotenv import load_dotenv
 import time
 
-while True:
-    try:
         # --- Load env ---
         load_dotenv()
         TOKEN = os.getenv("DISCORD_TOKEN")
@@ -514,8 +512,3 @@ while True:
             print(f"✅ Bot connesso come {bot.user}")
 
         bot.run(TOKEN)
-
-    except Exception as e:
-        print(f"[BOT] Crash rilevato: {e}")
-    print("[BOT] Riavvio bot tra 5 secondi...")
-    time.sleep(5)
