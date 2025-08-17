@@ -514,8 +514,6 @@ while True:
         async def on_ready():
             print(f"✅ Bot connesso come {bot.user}")
 
-        keep_alive()  # start Flask
-        bot.loop.create_task(keep_repl_alive())  # start ping loop
         bot.run(TOKEN)
 
     except Exception as e:
