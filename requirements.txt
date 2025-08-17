@@ -3,5 +3,4 @@ yt-dlp
 aiohttp
 python-dotenv
 PyNaCl
-discord-py
 flask
