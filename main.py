@@ -4,7 +4,6 @@ import yt_dlp
 import asyncio
 import os
 from dotenv import load_dotenv
-from keep_alive import keep_alive, keep_repl_alive
 import time
 
 while True:
