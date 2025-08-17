@@ -1,0 +1,7 @@
+git+https://github.com/Pycord-Development/pycord.git
+yt-dlp
+aiohttp
+python-dotenv
+PyNaCl
+discord-py
+flask
