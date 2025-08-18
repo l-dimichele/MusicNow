@@ -1,10 +1,11 @@
 import discord
+from discord import app_commands, Interaction
 from discord.ext import commands
 import yt_dlp
 import asyncio
 import os
 from dotenv import load_dotenv
-import time
+from keep_alive import keep_alive, keep_repl_alive
 
 # --- Load env ---
 load_dotenv()
@@ -15,7 +16,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix="", intents=intents, heartbeat_timeout=120)
+bot = commands.Bot(command_prefix="", intents=intents)
 
 # --- YTDL / FFmpeg ---
 ytdl_opts = {
@@ -29,12 +30,10 @@ ytdl_opts = {
     'noplaylist': False,
     'default_search': 'auto'
 }
-
 ffmpeg_opts = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
-
 ytdl = yt_dlp.YoutubeDL(ytdl_opts)
 
 # --- Queue per guild ---
@@ -65,35 +64,40 @@ def get_queue(guild_id):
     return get_guild_data(guild_id)['queue']
 
 # --- YouTube API search ---
+
 async def search_youtube_yt_dlp(query: str):
-    """Cerca su YouTube senza API key usando yt-dlp"""
+    """Cerca su YouTube senza API key usando yt-dlp e ritorna Choice già pronti"""
     loop = asyncio.get_event_loop()
 
     def extract():
         with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
-            # ytsearch5 prende i primi 5 risultati
             return ydl.extract_info(f"ytsearch5:{query}", download=False)
 
     info = await loop.run_in_executor(None, extract)
     results = []
+
     for entry in info.get('entries', []):
         title = entry.get('title', 'Sconosciuto')
-        url = entry.get('url')
-        if not url:
+        video_id = entry.get('id')
+        if not video_id:
             continue
-        # Discord OptionChoice per autocomplete
-        display_title = title if len(title) <= 90 else title[:87] + "..."
-        results.append(discord.OptionChoice(name=display_title, value=f"https://www.youtube.com/watch?v={entry.get('id')}"))
+        display_title = title if len(title) <= 100 else title[:97] + "..."
+        results.append(app_commands.Choice(
+            name=display_title,
+            value=f"https://www.youtube.com/watch?v={video_id}"
+        ))
+
     return results
 
 autocomplete_cache = {}  # semplice cache 10 sec
 
-async def ytsearch_autocomplete(ctx: discord.AutocompleteContext):
-    query = ctx.value.strip()
+async def ytsearch_autocomplete(interaction: Interaction, current: str):
+    query = current.strip()
     if not query:
         return []
 
     try:
+        # Ottieni direttamente una lista di Choice
         results = await asyncio.wait_for(search_youtube_yt_dlp(query), timeout=2.5)
         return results
     except asyncio.TimeoutError:
@@ -213,6 +217,130 @@ class QueueSelectStandalone(discord.ui.Select):
         await self.parent.refresh_queue()
         await update_player_message(interaction.guild)
 
+class MusicButtons(discord.ui.Button):
+  def __init__(self, guild_id):
+      super().__init__(style=discord.ButtonStyle.green, label="▶️ Play/Resume")
+      self.guild_id = guild_id
+
+  async def callback(self, interaction: discord.Interaction):
+      vc = interaction.guild.voice_client
+      guild_data = get_guild_data(self.guild_id)
+      if vc and vc.is_paused():
+          vc.resume()
+          guild_data['paused'] = False
+          await interaction.response.send_message("▶️ Ripresa riproduzione.", ephemeral=True)
+      else:
+          await interaction.response.send_message("⚠️ Nulla da riprodurre.", ephemeral=True)
+
+  async def callback(self, interaction: discord.Interaction):
+      idx = int(self.values[0])
+      removed = self.parent.guild_data['queue'].pop(idx)
+      await interaction.response.send_message(f"❌ Rimosso dalla coda: **{removed['title']}**", ephemeral=True)
+      # aggiorna la view
+      await update_player_message(interaction.guild)
+
+# --- Music Controls View ---
+class MusicView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.response.send_message("❌ Devi essere in un canale vocale.", ephemeral=True)
+            return False
+        vc = interaction.guild.voice_client
+        if not vc or vc.channel != interaction.user.voice.channel:
+            await interaction.response.send_message("❌ Devi essere nel canale vocale del bot.", ephemeral=True)
+            return False
+        return True
+
+    # --- Music buttons ---
+    @discord.ui.button(label="▶️ Play/Resume", style=discord.ButtonStyle.success)
+    async def play_resume(self, button: discord.ui.Button, interaction: discord.Interaction):
+        guild_data = get_guild_data(self.guild_id)
+        vc = interaction.guild.voice_client
+        if vc and vc.is_paused():
+            vc.resume()
+            guild_data['paused'] = False
+            await interaction.response.send_message("▶️ Ripresa riproduzione.", ephemeral=True)
+        elif vc and not vc.is_playing():
+            if guild_data['queue']:
+                await play_next(interaction.guild, vc)
+                await interaction.response.send_message("▶️ Riproduzione avviata.", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ La coda è vuota.", ephemeral=True)
+        else:
+            await interaction.response.send_message("▶️ Musica già in riproduzione.", ephemeral=True)
+
+    @discord.ui.button(label="⏸ Pause", style=discord.ButtonStyle.secondary)
+    async def pause(self, button: discord.ui.Button, interaction: discord.Interaction):
+        guild_data = get_guild_data(self.guild_id)
+        vc = interaction.guild.voice_client
+        if vc and vc.is_playing():
+            vc.pause()
+            guild_data['paused'] = True
+            await interaction.response.send_message("⏸️ Musica messa in pausa.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Nessuna musica in riproduzione.", ephemeral=True)
+
+    @discord.ui.button(label="⏹ Stop", style=discord.ButtonStyle.danger)
+    async def stop(self, button: discord.ui.Button, interaction: discord.Interaction):
+        guild_data = get_guild_data(self.guild_id)
+        guild_data['queue'].clear()
+        guild_data['current_track'] = None
+        guild_data['paused'] = False
+        vc = interaction.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+        await interaction.response.send_message("⏹️ Riproduzione fermata e coda svuotata.", ephemeral=True)
+
+    @discord.ui.button(label="⏭ Next", style=discord.ButtonStyle.primary)
+    async def next(self, button: discord.ui.Button, interaction: discord.Interaction):
+        vc = interaction.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+        await interaction.response.send_message("⏭ Passata alla traccia successiva.", ephemeral=True)
+
+# --- View separata per la coda interattiva ---
+class QueueView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        self.guild_data = get_guild_data(ctx.guild.id)
+        self.queue = self.guild_data['queue']
+        self.message = None
+        self.refresh_menu()
+        active_queue_views[ctx.guild.id] = self
+
+    def refresh_menu(self):
+        self.clear_items()
+        if self.queue:
+            self.add_item(QueueSelect(self))
+
+    async def update_embed(self):
+        if self.message:
+            description = "\n".join(f"{i+1}. {t['title']}" for i, t in enumerate(self.queue)) or "La coda è vuota."
+            embed = discord.Embed(title="📜 Coda aggiornata", description=description, color=discord.Color.blurple())
+            await self.message.edit(embed=embed, view=self)
+
+    async def on_timeout(self):
+        if self.ctx.guild.id in active_queue_views:
+            del active_queue_views[self.ctx.guild.id]
+        if self.message:
+            await self.message.edit(view=None)
+
+    async def callback(self, interaction: discord.Interaction):
+        idx = int(self.values[0])
+        if 0 <= idx < len(self.parent.queue):
+            removed = self.parent.queue.pop(idx)
+            await interaction.response.send_message(f"❌ Rimosso dalla coda: **{removed['title']}**", ephemeral=True)
+            # disabilita il menu dopo la selezione
+            for item in self.parent.children:
+                item.disabled = True
+            await self.parent.update_embed()
+
+
 # --- Funzioni principali ---
 async def update_player_message(guild):
     guild_data = get_guild_data(guild.id)
@@ -314,17 +442,18 @@ async def play_next(guild, vc=None, seek_time=0):
         await play_next(guild, vc)
 
 # --- Slash command ---
-@bot.slash_command(name="play", description="Cerca o riproduci musica da YouTube")
-@discord.option("query", description="Titolo o link YouTube", autocomplete=ytsearch_autocomplete)
-async def play(ctx: discord.ApplicationContext, query: str):
-    await ctx.defer()
+@bot.tree.command(name="play", description="Cerca o riproduci musica da YouTube")
+@app_commands.describe(query="Titolo o link del brano da cercare")
+@app_commands.autocomplete(query=ytsearch_autocomplete)
+async def play(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(ephemeral=True)
 
-    if not ctx.author.voice or not ctx.author.voice.channel:
-        return await ctx.respond("❌ Devi essere in un canale vocale!", ephemeral=True)
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        return await interaction.followup.send("❌ Devi essere in un canale vocale!", ephemeral=True)
 
-    guild_queue = get_queue(ctx.guild.id)
+    guild_queue = get_queue(interaction.guild.id)
     if len(guild_queue) > 120:
-        return await ctx.respond("⚠️ Coda troppo lunga.", ephemeral=True)
+        return await interaction.followup.send("⚠️ Coda troppo lunga.", ephemeral=True)
 
     added = 0
     skipped = 0
@@ -342,14 +471,13 @@ async def play(ctx: discord.ApplicationContext, query: str):
         }
         guild_queue.append(track)
         added += 1
-        await update_player_message(ctx.guild)
+        await update_player_message(interaction.guild)
         first_track_ready.set()  # Segnala che almeno una traccia è pronta
 
     try:
         ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'ignoreerrors': True, 'geo_bypass': True}
 
         if query.startswith("http"):
-            # Mantieni il comportamento corrente con link diretto
             loop = asyncio.get_event_loop()
             def extract():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -358,11 +486,10 @@ async def play(ctx: discord.ApplicationContext, query: str):
             entries = info.get('entries', [info])
             await asyncio.gather(*(process_entry(entry) for entry in entries))
         else:
-            # Ricerca con yt-dlp senza API
             results = await search_youtube_yt_dlp(query)
             if not results:
-                return await ctx.respond("❌ Nessun risultato trovato.", ephemeral=True)
-            first_url = results[0].value  # prende il primo risultato
+                return await interaction.followup.send("❌ Nessun risultato trovato.", ephemeral=True)
+            first_url = results[0].value
             loop = asyncio.get_event_loop()
             def extract():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -371,22 +498,34 @@ async def play(ctx: discord.ApplicationContext, query: str):
             await process_entry(info)
 
     except Exception as e:
-        return await ctx.respond(f"❌ Errore caricando link o ricerca: {e}", ephemeral=True)
+        return await interaction.followup.send(f"❌ Errore caricando link o ricerca: {e}", ephemeral=True)
 
-    await ctx.respond(f"✅ Aggiunte {added} tracce alla coda. ⚠️ Skippate {skipped} tracce protette o non disponibili.")
+    await interaction.followup.send(f"✅ Aggiunte {added} tracce alla coda. ⚠️ Skippate {skipped} tracce protette o non disponibili.", ephemeral=True)
 
     # Connetti al voice channel solo quando c’è una traccia pronta
     await first_track_ready.wait()
-    vc = await ensure_vc_connected(ctx.guild, ctx.author.voice.channel)
+    vc = await ensure_vc_connected(interaction.guild, interaction.user.voice.channel)
     if vc is None:
-        return await ctx.followup.send("❌ Non sono riuscito a connettermi al canale vocale.", ephemeral=True)
+        return await interaction.followup.send("❌ Non sono riuscito a connettermi al canale vocale.", ephemeral=True)
 
     if not vc.is_playing():
-        await play_next(ctx.guild, vc)
+        await play_next(interaction.guild, vc)
+
 
 # --- Ready ---
 @bot.event
 async def on_ready():
-    print(f"✅ Bot connesso come {bot.user}")
+    print(f"✅ Connesso come {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"🔗 {len(synced)} slash command sincronizzati")
+    except Exception as e:
+        print(f"Errore sync: {e}")
 
-bot.run(TOKEN)
+async def main():
+    keep_alive()  # avvia il Flask server
+    asyncio.create_task(keep_repl_alive())  # ping loop
+    await bot.start(TOKEN)
+
+# Avvia tutto
+asyncio.run(main())
