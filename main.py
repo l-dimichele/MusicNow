@@ -5,7 +5,6 @@ import yt_dlp
 import asyncio
 import os
 from dotenv import load_dotenv
-from keep_alive import keep_alive, keep_repl_alive
 
 # --- Load env ---
 load_dotenv()
@@ -523,8 +522,6 @@ async def on_ready():
         print(f"Errore sync: {e}")
 
 async def main():
-    keep_alive()  # avvia il Flask server
-    asyncio.create_task(keep_repl_alive())  # ping loop
     await bot.start(TOKEN)
 
 # Avvia tutto
