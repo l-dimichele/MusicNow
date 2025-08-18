@@ -1,6 +1,6 @@
-git+https://github.com/Pycord-Development/pycord.git
 yt-dlp
 aiohttp
 python-dotenv
 PyNaCl
 flask
+discord-py
