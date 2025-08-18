@@ -6,12 +6,6 @@ import asyncio
 import os
 from dotenv import load_dotenv
 
-
-url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-    info = ydl.extract_info(url, download=False)
-    print(info)
-
 # --- Load env ---
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
